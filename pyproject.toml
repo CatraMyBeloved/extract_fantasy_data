@@ -1,7 +1,12 @@
 [project]
 name = "extract-fantasy-data"
 version = "0.1.0"
-description = "Add your description here"
+description = "ETL from owtvgg Postgres source into parquet star-schema warehouse for fantasy analytics."
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "polars>=1.17.0",
+    "psycopg[binary]>=3.2.0",
+    "python-dotenv>=1.0.1",
+    "pyarrow>=18.0.0",
+]

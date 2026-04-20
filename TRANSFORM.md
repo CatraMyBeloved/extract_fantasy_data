@@ -27,8 +27,10 @@ One source row in `player_map_stats` → one fact row.
 | fk_opponent      | `match.team1_id` / `match.team2_id` (the one that isn't `team_id`)        | join via `match_map.match_id → match`      |
 | fk_map           | `match_map.map_id`                                                        | remap to dim_gamemap surrogate id          |
 | fk_time          | derived — see "Week assignment" below                                     |                                            |
-| fk_hero          | **NOT AVAILABLE** — see Issue 1                                           |                                            |
 | fk_region        | `tournament.region` → remap via dim_region                                | via `match → tournament_phase → tournament`|
+| fk_team_ban      | ban picked by player's team — see "Ban alignment" below                   | remap to dim_hero surrogate id             |
+| fk_opponent_ban  | ban picked by opposing team — see "Ban alignment" below                   | remap to dim_hero surrogate id             |
+| role             | `player_map_stats.role`                                                   | degenerate dim: TANK / DAMAGE / SUPPORT    |
 | match_id         | `match_map.match_id`                                                      | degenerate dim                             |
 | fantasy_score    | `player_map_stats.cached_fantasy_score`                                   | already computed upstream                  |
 | eliminations     | `player_map_stats.eliminations`                                           |                                            |
@@ -41,6 +43,21 @@ One source row in `player_map_stats` → one fact row.
 | match_win        | `match.winning_team_id == player_map_stats.team_id`                       |                                            |
 
 Note: `player_map_stats.match_start_date` is denormalized on the row — useful for week assignment without joining up.
+
+### Ban alignment
+
+`match_map` stores bans as `team1_ban_id` / `team2_ban_id`, keyed to `match.team1_id` / `match.team2_id`. The fact row is player-centric, so remap:
+
+```
+if player_map_stats.team_id == match.team1_id:
+    fk_team_ban     = match_map.team1_ban_id
+    fk_opponent_ban = match_map.team2_ban_id
+else:
+    fk_team_ban     = match_map.team2_ban_id
+    fk_opponent_ban = match_map.team1_ban_id
+```
+
+Same trick as `fk_opponent`. Both ban fields are nullable on source (not every map has recorded bans).
 
 ---
 
@@ -77,7 +94,15 @@ Source: `game_map`
 | map_type | `game_map.mode`   | enum: control, escort, flashpoint, hybrid, push, clash  |
 
 ### dim_hero
-See Issue 1 — source data does not record which hero each player played. This dim may need to be dropped.
+Source: `game_hero`
+
+| Target    | Source           | Notes                                    |
+|-----------|------------------|------------------------------------------|
+| id        | surrogate        |                                          |
+| hero_name | `game_hero.name` |                                          |
+| role      | `game_hero.role` | if available on source                   |
+
+Referenced only via `fk_team_ban` / `fk_opponent_ban` on the fact. No hero-per-player-per-map pick data exists upstream (confirmed in `owtvgg` — `player_map_stats` has no `hero_id`, only `role`).
 
 ### dim_time
 Derived. One row per (tournament_phase, week_number).
@@ -102,73 +127,78 @@ Derived. One row per in-scope region.
 
 ---
 
-## Open Issues
+## Decisions & Open Items
 
-### 1. No hero per player per map — `dim_hero` / `fk_hero` not fillable
-`player_map_stats` has no `hero_id` column. The only hero references are `match_map.team1_ban_id` and `team2_ban_id` (bans, not picks). `game_hero` exists but isn't linked to performance data.
+### 1. Hero data — resolved
+No hero-per-player-per-map pick data exists in source. Confirmed by reading `owtvgg/apps/web/db/collections/tournaments/player-map-stats.ts` — only `role` is recorded per player per map.
 
-`player_map_stats.role` (enum: TANK / DAMAGE / SUPPORT) is the only hero-related signal.
+**Decision:** keep `dim_hero` sourced from `game_hero`. Reference it via `fk_team_ban` and `fk_opponent_ban` on the fact (see "Ban alignment"). Add `role` as a degenerate dim on the fact.
 
-**Options:**
-- (A) Drop `fk_hero` and `dim_hero`. Add `role` as a degenerate dim on the fact.
-- (B) Keep `dim_hero` but repurpose for ban analysis only, tied to match_map not to fact_player_map_stats.
-- (C) Confirm there really is no hero-per-map data anywhere (check for views, or ask whoever owns the source DB).
-
-Recommendation: **(A)** unless hero picks are going to be added upstream. Role is still useful analytically ("how do damage players perform on this map").
-
-### 2. No week number in source — must be derived
-Neither `tournament_phase` nor `match` have a week column. Nearest signals:
-- `tournament_phase.start_date` / `end_date`
-- `match.start_date` / `player_map_stats.match_start_date`
-- `match.faceit_round` (unclear semantics — could be useful)
-
-**Suggested derivation:**
+### 2. Week number — resolved
+No week column in source. Derive per phase using literal 7-day windows from phase start:
 ```
 week_number = floor((match_start_date - phase.start_date) / 7 days) + 1
 ```
-Scoped per phase. Bracket phases collapse to a single "week" if they span ≤ 7 days, else split.
+No canonical Mon–Sun calendar week in the source product (fantasy rounds are date-ranged, not weekly). `match.faceit_round` remains unclear semantically; ignore for now.
 
-**Open question:** does the fantasy product have a canonical week boundary (e.g., Monday-to-Sunday)? If so, use that instead of relative-to-phase-start.
+### 3. Phase types — resolved
+Source enum: `bracket, regular_season, groups, other`. Data inspection (2026-04-20) showed:
 
-### 3. Phase types — which are in scope?
-Source enum: `bracket, regular_season, groups, other`.
-SCHEMA.md scope: regular_season + bracket only.
+| type            | name                                | count |
+|-----------------|-------------------------------------|-------|
+| bracket         | Playoffs                            | 3     |
+| regular_season  | Regular Season                      | 3     |
+| regular_season  | Last Chance Qualifier               | 1     |
+| regular_season  | Playoffs Seeding Decider Matches    | 1     |
+| groups          | —                                   | 0     |
+| other           | —                                   | 0     |
 
-**Decisions needed:**
-- `groups` — group stages before bracket. Likely in scope if tournaments use them?
-- `other` — catch-all. Probably exclude.
+LCQ and seeding deciders are encoded as `type='regular_season'` at the source, and the source fantasy pipeline scores them as regular season. We follow suit — no name-based exclusion.
 
-Also confirm: LCQ and seeding decider phases are excluded. Are these encoded as `other`, or stored with specific `name` values inside `regular_season` / `bracket`? Need to inspect data.
+**Filter rule:**
+```sql
+tp.type IN ('regular_season', 'bracket')
+```
 
-### 4. Region filter
-Source enum: `asia, EMEA, NA, china, japan, korea, pacific, global`.
-In scope: NA, EMEA, korea.
+`groups` / `other` are empty today. Revisit scope if they populate in future data.
 
-Filter applied at the tournament level: `WHERE tournament.region IN ('NA', 'EMEA', 'korea')`.
+**Note:** this supersedes SCHEMA.md's line about excluding LCQ / seeding decider phases — update SCHEMA.md to match.
 
-Confirm: are there tournaments tagged `global` that contain NA/EMEA/korea matches we'd want (e.g., LANs)? SCHEMA.md says LAN excluded, so probably safe to hard-filter.
+### 4. Region filter — decided
+In scope: `NA, EMEA, korea`. Filter at tournament level: `WHERE tournament.region IN ('NA','EMEA','korea')`.
 
-### 5. `player_map_stats.person_id` is nullable
-Source has `person_id integer` (no `not null`). Some rows may not resolve to a person — probably should be filtered out of the fact table, but worth checking how common this is.
+Data inspection (2026-04-20) confirmed **no `global` tournaments exist** in the source today, so the filter is currently a no-op beyond excluding `asia / china / japan / pacific`. If `global` entries appear later (e.g., OWCS Finals), revisit — may want to derive region from `team.region` instead of `tournament.region`.
 
-### 6. `match_map.complete` flag
-Boolean, nullable. Likely want to filter to `complete = true` so partial/cancelled maps don't pollute stats. Confirm.
+### 5. Nullable `person_id` — resolved
+Filter out null-person rows silently during fact-table build. Matches how `owtvgg` handles them: `recalculate-round-stats.ts:54` and `propagate-map-scores-to-rosters.ts:34` both skip rows where person is null.
 
-### 7. Fantasy score `cached_` prefix
-`cached_fantasy_score` implies it's a derived/cached value upstream. Need to understand:
-- When is the cache populated? (affects freshness)
-- Can it be null or stale?
-- What's the underlying formula? (for sanity checks / extending)
+Data inspection (2026-04-20) confirmed **zero null-person rows** in current data. Filter is defensive / future-proofing.
+
+### 6. `match_map.complete` flag — configurable
+`complete=true` means stats are final and counted in the app's fantasy scoring. `complete=false` rows can exist with non-zero stats and a computed `cached_fantasy_score`, but the app doesn't count them.
+
+**Decision:** expose as a pipeline parameter `filter_complete_only: bool`, default **False** for now (current dataset is curated manually, all maps are considered entered correctly). Switch to `True` once we move to a recurring ingest where partial/in-progress maps will exist in the source.
+
+Data inspection (2026-04-20) confirmed **no incomplete maps** in current data.
+
+### 7. `cached_fantasy_score` — resolved
+Formula found at `owtvgg/apps/web/db/collections/fantasy/hooks/compute-fantasy-score.ts:4-27`:
+```
+score = floor(eliminations / 3)
+      + (deaths * -1)
+      + floor((damage_dealt + healing_done) / 1000) * 0.5
+```
+Computed in a `beforeChange` hook on `player_map_stats`, so it's always recomputed on any stat update — effectively never stale. Inputs: **only** `eliminations`, `deaths`, `damage_dealt`, `healing_done`. `assists`, `damage_mitigated`, and `role` are **not** used in scoring (keep them in the fact for independent analysis). Null is theoretically possible only if a row was inserted bypassing the hook; treat as rare.
 
 ---
 
 ## Pipeline Order
 
-1. Load dims from source (person, team, game_map, tournament + tournament_phase)
+1. Load dims from source (person, team, game_map, game_hero, tournament + tournament_phase)
 2. Build `dim_region` from distinct in-scope regions
 3. Build `dim_time` from distinct (tournament_phase, week) pairs — requires joining up from match_start_date
 4. Assign surrogate ids for all dims
-5. Load `player_map_stats` + joins → `fact_player_map_stats`, remapping natural ids to dim surrogate ids
-6. Filter to in-scope regions + phase types + complete maps + non-null person_id
+5. Load `player_map_stats` + joins → `fact_player_map_stats`, remapping natural ids to dim surrogate ids; apply ban alignment to produce `fk_team_ban` / `fk_opponent_ban`
+6. Filter to in-scope regions + phase types + non-null person_id (+ `complete=true` if `filter_complete_only` is enabled)
 7. Write to parquet
 8. Downstream: derive `fact_team_match_stats` aggregate

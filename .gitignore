@@ -1,2 +1,10 @@
 .idea/
 old_structure_dump/*
+.env
+output/
+__pycache__/
+*.pyc
+.venv/
+.python-version
+.env.example
+uv.lock

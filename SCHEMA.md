@@ -3,7 +3,7 @@
 ## Scope
 - NA, EMEA, and Korea regional play (regular season + playoffs)
 - LAN events excluded for now
-- LCQ and seeding decider phases exist in source but excluded from scope
+- LCQ and seeding decider phases are included — source encodes them as `type='regular_season'` and the source fantasy pipeline scores them as regular season, so we follow suit
 - Korea weeks are NOT synced with NA/EMEA — never compare week numbers across regions
 - Fantasy has two roster pools: Korea and non-Korea (western) — frontend should mirror this split
 
@@ -37,16 +37,18 @@ Grain: one row per player per map played.
 | fk_opponent | int | → dim_team (opposing team, role-playing dim) |
 | fk_map | int | → dim_gamemap |
 | fk_time | int | → dim_time |
-| fk_hero | int | → dim_hero |
 | fk_region | int | → dim_region |
+| fk_team_ban | int | → dim_hero — ban picked by player's team (nullable) |
+| fk_opponent_ban | int | → dim_hero — ban picked by opposing team (nullable) |
+| role | enum | TANK / DAMAGE / SUPPORT — degenerate dim |
 | match_id | int | degenerate dim, for grouping maps per match |
 | fantasy_score | float | pre-computed in source DB |
 | eliminations | int | |
-| assists | int | |
+| assists | int | not used in fantasy score, kept for analysis |
 | deaths | int | |
 | damage | int | |
 | healing | int | |
-| mitigated | int | |
+| mitigated | int | not used in fantasy score, kept for analysis |
 | map_win | bool | did player's team win this map |
 | match_win | bool | did player's team win the match |
 
@@ -90,6 +92,8 @@ Grain: one row per player per map played.
 | id     | int  | id to fk to fact table |
 | name   | str  | hero name              |
 | role   | str  | hero role              |
+
+- Referenced only via `fk_team_ban` / `fk_opponent_ban` on the fact — source does not record which hero each player played per map, only bans per match_map
 
 
 ### dim_time
