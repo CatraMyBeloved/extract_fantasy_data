@@ -88,18 +88,31 @@ Grain: one row per player per map played.
 | Column | Type | Notes                  |
 |--------|------|------------------------|
 | id     | int  | id to fk to fact table |
-|        |      |                        |
-|        |      |                        |
+| name   | str  | hero name              |
+| role   | str  | hero role              |
 
 
 ### dim_time
-- TBD
-- Grain: one row per week
-- Holds full hierarchy: week → stage → tournament → region
-- fk_region → dim_region
+Grain: one row per week. Flat dim holding the full hierarchy (week → stage → tournament → region) so one join gives you everything.
+
+| Column        | Type | Notes                                |
+|---------------|------|--------------------------------------|
+| id            | int  | id to fk to fact table               |
+| week_number   | int  | week number within stage             |
+| stage_id      | int  | source stage/phase id                |
+| stage_name    | str  | e.g. "Regular Season", "Playoffs"    |
+| stage_type    | enum | regular_season / bracket             |
+| tournament_id | int  | source tournament id                 |
+| fk_region     | int  | → dim_region                         |
 
 ### dim_region
-- TBD
+Exists for schema clarity — only a few rows, but nobody would guess region lives inside dim_time.
+
+| Column      | Type | Notes                  |
+|-------------|------|------------------------|
+| id          | int  | id to fk to fact table |
+| region_name | str  | NA / EMEA / Korea      |
+
 - fk_region is a direct FK on the fact (common filter, avoids extra join through dim_time)
 
 ---
